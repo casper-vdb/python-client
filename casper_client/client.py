@@ -1,11 +1,7 @@
 from __future__ import annotations
 
-import math
 import struct
-from typing import Any, Iterator, Sequence
-from urllib.parse import urlparse
-
-import grpc
+from typing import Any, Iterable, Sequence
 
 from casper_client.errors import CasperError, CasperErrorKind
 from casper_client.http import ApiClient
@@ -13,33 +9,34 @@ from casper_client.models import (
     CollectionInfo,
     CollectionsListResponse,
     GetVectorResponse,
-    MatrixInfo,
-    PQInfo,
     SearchResult,
-    UploadMatrixResult,
+    VectorPoint,
 )
 
 
-def _strip_scheme(host: str) -> str:
-    if host.startswith("http://") or host.startswith("https://"):
-        parsed = urlparse(host)
-        if parsed.hostname:
-            return parsed.hostname
-        return host.split("://", 1)[1]
-    return host
+def _coerce_points(points: Iterable[VectorPoint | dict[str, Any]]) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for p in points:
+        if isinstance(p, VectorPoint):
+            out.append(p.to_dict())
+        elif isinstance(p, dict):
+            out.append({"id": int(p["id"]), "vector": list(p["vector"])})
+        else:
+            raise CasperError(
+                kind=CasperErrorKind.CLIENT,
+                message=f"invalid point: expected VectorPoint or dict, got {type(p).__name__}",
+            )
+    return out
 
 
 class CasperClient:
-    """
-    High-level Casper HTTP/gRPC client.
-    """
+    """High-level HTTP client for Casper Vector Database."""
 
     def __init__(
         self,
         *,
         host: str = "http://127.0.0.1",
         http_port: int = 8080,
-        grpc_port: int = 50051,
         timeout: float | None = 30.0,
         **httpx_kwargs: Any,
     ) -> None:
@@ -48,19 +45,20 @@ class CasperClient:
             base = "http://" + base
 
         self._rest_uri = f"{base}:{http_port}"
-        self._grpc_addr = f"{_strip_scheme(host)}:{grpc_port}"
         self._http = ApiClient(self._rest_uri, timeout=timeout, **httpx_kwargs)
 
     @property
     def rest_uri(self) -> str:
         return self._rest_uri
 
-    @property
-    def grpc_addr(self) -> str:
-        return self._grpc_addr
-
     def close(self) -> None:
         self._http.close()
+
+    def __enter__(self) -> "CasperClient":
+        return self
+
+    def __exit__(self, *_exc: Any) -> None:
+        self.close()
 
     # -------------------------
     # Health
@@ -83,7 +81,9 @@ class CasperClient:
         return CollectionsListResponse.from_dict(data)
 
     def get_collection(self, name: str) -> CollectionInfo:
-        data = self._http.request_json(method="GET", url="/collection/{name}", path_params={"name": name})
+        data = self._http.request_json(
+            method="GET", url="/collection/{name}", path_params={"name": name}
+        )
         if not isinstance(data, dict):
             raise CasperError(
                 kind=CasperErrorKind.INVALID_RESPONSE,
@@ -97,44 +97,58 @@ class CasperClient:
             url="/collection/{name}",
             path_params={"name": name},
             params={"dim": dim, "max_size": max_size},
-            headers={"Content-Type": "application/json"},
         )
 
     def delete_collection(self, name: str) -> None:
-        self._http.request_bytes(method="DELETE", url="/collection/{name}", path_params={"name": name})
+        self._http.request_bytes(
+            method="DELETE", url="/collection/{name}", path_params={"name": name}
+        )
 
     def mute_collection(self, name: str) -> None:
-        self._http.request_bytes(method="POST", url="/collection/{name}/mute", path_params={"name": name})
+        self._http.request_bytes(
+            method="POST", url="/collection/{name}/mute", path_params={"name": name}
+        )
 
     def unmute_collection(self, name: str) -> None:
-        self._http.request_bytes(method="POST", url="/collection/{name}/unmute", path_params={"name": name})
+        self._http.request_bytes(
+            method="POST", url="/collection/{name}/unmute", path_params={"name": name}
+        )
 
     # -------------------------
     # Vectors
     # -------------------------
 
-    def insert_vector(self, collection: str, *, id: int, vector: Sequence[float]) -> None:
+    def upsert_vectors(
+        self,
+        collection: str,
+        vectors: Iterable[VectorPoint | dict[str, Any]],
+    ) -> None:
+        """PUT /collection/{name}/vectors — upsert a batch of points."""
+        payload = {"vectors": _coerce_points(vectors)}
         self._http.request_bytes(
-            method="POST",
-            url="/collection/{name}/insert",
+            method="PUT",
+            url="/collection/{name}/vectors",
             path_params={"name": collection},
-            params={"id": id},
-            json={"vector": list(vector)},
+            json=payload,
             headers={"Content-Type": "application/json"},
         )
 
-    def delete_vector(self, collection: str, *, id: int) -> None:
+    def delete_vectors(self, collection: str, ids: Sequence[int]) -> None:
+        """POST /collection/{name}/vectors/delete — delete a batch of ids."""
+        payload = {"vectors": [int(i) for i in ids]}
         self._http.request_bytes(
-            method="DELETE",
-            url="/collection/{name}/delete",
+            method="POST",
+            url="/collection/{name}/vectors/delete",
             path_params={"name": collection},
-            params={"id": id},
+            json=payload,
             headers={"Content-Type": "application/json"},
         )
 
     def get_vector(self, collection: str, *, id: int) -> GetVectorResponse:
         data = self._http.request_json(
-            method="GET", url="/collection/{name}/vector/{id}", path_params={"name": collection, "id": id}
+            method="GET",
+            url="/collection/{name}/vector/{id}",
+            path_params={"name": collection, "id": id},
         )
         if not isinstance(data, dict):
             raise CasperError(
@@ -147,12 +161,13 @@ class CasperClient:
         self,
         collection: str,
         *,
-        insert: Sequence[dict[str, Any]] | None = None,
+        insert: Iterable[VectorPoint | dict[str, Any]] | None = None,
         delete: Sequence[int] | None = None,
     ) -> None:
+        """POST /collection/{name}/update — combined insert + delete batch."""
         payload = {
-            "insert": list(insert) if insert is not None else [],
-            "delete": list(delete) if delete is not None else [],
+            "insert": _coerce_points(insert) if insert is not None else [],
+            "delete": [int(i) for i in delete] if delete is not None else [],
         }
         self._http.request_bytes(
             method="POST",
@@ -175,22 +190,22 @@ class CasperClient:
         m: int,
         m0: int,
         ef_construction: int,
-        pq_name: str | None = None,
         normalization: bool | None = None,
     ) -> None:
-        hnsw: dict[str, Any] = {
-            "metric": metric,
-            "quantization": quantization,
-            "m": m,
-            "m0": m0,
-            "ef_construction": ef_construction,
+        """POST /collection/{name}/index — server returns 202; the index
+        build runs asynchronously. Poll get_collection().has_index to wait
+        for completion."""
+        body: dict[str, Any] = {
+            "hnsw": {
+                "metric": metric,
+                "quantization": quantization,
+                "m": int(m),
+                "m0": int(m0),
+                "ef_construction": int(ef_construction),
+            },
         }
-        if pq_name is not None:
-            hnsw["pq_name"] = pq_name
-
-        body: dict[str, Any] = {"hnsw": hnsw}
         if normalization is not None:
-            body["normalization"] = normalization
+            body["normalization"] = bool(normalization)
 
         self._http.request_bytes(
             method="POST",
@@ -201,22 +216,40 @@ class CasperClient:
         )
 
     def delete_index(self, collection: str) -> None:
-        self._http.request_bytes(method="DELETE", url="/collection/{name}/index", path_params={"name": collection})
+        self._http.request_bytes(
+            method="DELETE",
+            url="/collection/{name}/index",
+            path_params={"name": collection},
+        )
 
     # -------------------------
     # Search
     # -------------------------
 
-    def search(self, collection: str, *, query: Sequence[float], limit: int, output: str = "bin") -> list[SearchResult]:
+    def search(
+        self,
+        collection: str,
+        *,
+        query: Sequence[float],
+        limit: int,
+        ef_search: int | None = None,
+        output: str = "bin",
+    ) -> list[SearchResult]:
         if output not in ("bin", "json"):
-            raise CasperError(kind=CasperErrorKind.CLIENT, message="output must be 'bin' or 'json'")
+            raise CasperError(
+                kind=CasperErrorKind.CLIENT, message="output must be 'bin' or 'json'"
+            )
+
+        params: dict[str, Any] = {"limit": int(limit), "output": output}
+        if ef_search is not None:
+            params["ef_search"] = int(ef_search)
 
         if output == "bin":
             raw = self._http.request_bytes(
                 method="POST",
                 url="/collection/{name}/search",
                 path_params={"name": collection},
-                params={"limit": limit, "output": "bin"},
+                params=params,
                 json={"vector": list(query)},
                 headers={"Content-Type": "application/json"},
             )
@@ -226,28 +259,38 @@ class CasperClient:
             method="POST",
             url="/collection/{name}/search",
             path_params={"name": collection},
-            params={"limit": limit, "output": "json"},
+            params=params,
             json={"vector": list(query)},
             headers={"Content-Type": "application/json"},
         )
-        if not isinstance(data, list):
-            raise CasperError(kind=CasperErrorKind.INVALID_RESPONSE, message="expected JSON array from search")
+        items = data.get("result") if isinstance(data, dict) else None
+        if not isinstance(items, list):
+            raise CasperError(
+                kind=CasperErrorKind.INVALID_RESPONSE,
+                message="expected {'result': [...]} from search JSON response",
+            )
         out: list[SearchResult] = []
-        for item in data:
-            if isinstance(item, list) and len(item) == 2:
-                out.append(SearchResult(id=int(item[0]), score=float(item[1])))
+        for item in items:
+            if isinstance(item, dict) and "id" in item and "score" in item:
+                out.append(SearchResult(id=int(item["id"]), score=float(item["score"])))
         return out
 
     @staticmethod
     def _decode_search_bin(buf: bytes) -> list[SearchResult]:
         if len(buf) < 4:
-            raise CasperError(kind=CasperErrorKind.INVALID_RESPONSE, message="binary search response too short")
+            raise CasperError(
+                kind=CasperErrorKind.INVALID_RESPONSE,
+                message="binary search response too short",
+            )
         (count,) = struct.unpack_from("<I", buf, 0)
         expected = 4 + int(count) * 8
         if len(buf) < expected:
             raise CasperError(
                 kind=CasperErrorKind.INVALID_RESPONSE,
-                message=f"binary search response truncated: expected at least {expected} bytes, got {len(buf)}",
+                message=(
+                    f"binary search response truncated: expected at least "
+                    f"{expected} bytes, got {len(buf)}"
+                ),
             )
         out: list[SearchResult] = []
         offset = 4
@@ -256,129 +299,3 @@ class CasperClient:
             out.append(SearchResult(id=int(id_u32), score=float(score_f32)))
             offset += 8
         return out
-
-    # -------------------------
-    # Matrix HTTP
-    # -------------------------
-
-    def list_matrices(self) -> list[MatrixInfo]:
-        data = self._http.request_json(method="GET", url="/matrix/list", headers={"Content-Type": "application/json"})
-        if not isinstance(data, list):
-            raise CasperError(kind=CasperErrorKind.INVALID_RESPONSE, message="expected JSON array from /matrix/list")
-        return [MatrixInfo.from_dict(x) for x in data if isinstance(x, dict)]
-
-    def get_matrix_info(self, name: str) -> MatrixInfo:
-        data = self._http.request_json(
-            method="GET", url="/matrix/{name}", path_params={"name": name}, headers={"Content-Type": "application/json"}
-        )
-        if not isinstance(data, dict):
-            raise CasperError(kind=CasperErrorKind.INVALID_RESPONSE, message="expected JSON object from /matrix/{name}")
-        return MatrixInfo.from_dict(data)
-
-    def delete_matrix(self, name: str) -> None:
-        self._http.request_bytes(
-            method="DELETE", url="/matrix/{name}", path_params={"name": name}, headers={"Content-Type": "application/json"}
-        )
-
-    # -------------------------
-    # PQ
-    # -------------------------
-
-    def create_pq(self, name: str, *, dim: int, codebooks: Sequence[str]) -> None:
-        self._http.request_bytes(
-            method="POST",
-            url="/pq/{name}",
-            path_params={"name": name},
-            json={"dim": dim, "codebooks": list(codebooks)},
-            headers={"Content-Type": "application/json"},
-        )
-
-    def delete_pq(self, name: str) -> None:
-        self._http.request_bytes(
-            method="DELETE", url="/pq/{name}", path_params={"name": name}, headers={"Content-Type": "application/json"}
-        )
-
-    def list_pqs(self) -> list[PQInfo]:
-        data = self._http.request_json(method="GET", url="/pq/list", headers={"Content-Type": "application/json"})
-        if not isinstance(data, list):
-            raise CasperError(kind=CasperErrorKind.INVALID_RESPONSE, message="expected JSON array from /pq/list")
-        return [PQInfo.from_dict(x) for x in data if isinstance(x, dict)]
-
-    def get_pq_info(self, name: str) -> PQInfo:
-        data = self._http.request_json(
-            method="GET", url="/pq/{name}", path_params={"name": name}, headers={"Content-Type": "application/json"}
-        )
-        if not isinstance(data, dict):
-            raise CasperError(kind=CasperErrorKind.INVALID_RESPONSE, message="expected JSON object from /pq/{name}")
-        return PQInfo.from_dict(data)
-
-    # -------------------------
-    # gRPC UploadMatrix
-    # -------------------------
-
-    def upload_matrix(
-        self,
-        *,
-        name: str,
-        dimension: int,
-        vectors: Sequence[Sequence[float]] | Sequence[float],
-        chunk_floats: int | None = None,
-    ) -> UploadMatrixResult:
-        if dimension <= 0:
-            raise CasperError(kind=CasperErrorKind.CLIENT, message="dimension must be greater than 0")
-
-        flat = self._flatten_vectors(vectors)
-        if len(flat) % dimension != 0:
-            raise CasperError(
-                kind=CasperErrorKind.CLIENT,
-                message=f"vector buffer length {len(flat)} is not divisible by dimension {dimension}",
-            )
-
-        if chunk_floats is None or chunk_floats < dimension:
-            chunk_floats = dimension
-
-        from casper_client.grpc import matrix_service_pb2 as pb2
-        from casper_client.grpc import matrix_service_pb2_grpc as pb2_grpc
-
-        total_floats = len(flat)
-        total_chunks = int(math.ceil(total_floats / float(chunk_floats)))
-
-        max_vectors_per_chunk = max(1, chunk_floats // dimension)
-        header = pb2.MatrixHeader(
-            name=name,
-            dimension=int(dimension),
-            total_chunks=int(total_chunks),
-            max_vectors_per_chunk=int(max_vectors_per_chunk),
-        )
-
-        def gen() -> Iterator[pb2.UploadMatrixRequest]:
-            yield pb2.UploadMatrixRequest(header=header)
-            for chunk_idx in range(total_chunks):
-                start = chunk_idx * chunk_floats
-                end = min(start + chunk_floats, total_floats)
-                yield pb2.UploadMatrixRequest(
-                    data=pb2.MatrixData(chunk_index=chunk_idx + 1, vector=flat[start:end])
-                )
-
-        try:
-            with grpc.insecure_channel(self._grpc_addr) as channel:
-                stub = pb2_grpc.MatrixServiceStub(channel)
-                resp = stub.UploadMatrix(gen())
-        except Exception as e:
-            raise CasperError(kind=CasperErrorKind.CLIENT, message="UploadMatrix failed", cause=e) from e
-
-        return UploadMatrixResult(total_vectors=int(resp.total_vectors), total_chunks=int(resp.total_chunks))
-
-    @staticmethod
-    def _flatten_vectors(vectors: Sequence[Sequence[float]] | Sequence[float]) -> list[float]:
-        if len(vectors) == 0:
-            return []
-        first = vectors[0]  # type: ignore[index]
-        if isinstance(first, (int, float)):
-            return [float(x) for x in vectors]  # type: ignore[arg-type]
-        out: list[float] = []
-        for row in vectors:  # type: ignore[assignment]
-            out.extend(float(x) for x in row)
-        return out
-
-

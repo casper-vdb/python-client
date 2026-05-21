@@ -1,32 +1,38 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+
+
+@dataclass
+class HnswIndexInfo:
+    metric: str
+    quantization: str
+    m: int
+    m0: int
+    ef_construction: int
+
+    @staticmethod
+    def from_dict(data: dict) -> "HnswIndexInfo":
+        return HnswIndexInfo(
+            metric=data.get("metric", ""),
+            quantization=data.get("quantization", ""),
+            m=int(data.get("m", 0)),
+            m0=int(data.get("m0", 0)),
+            ef_construction=int(data.get("ef_construction", 0)),
+        )
 
 
 @dataclass
 class IndexInfo:
-    index_type: str
-    metric: str
-    quantization: str
     normalization: bool
-    max_elements: int | None = None
-    m: int | None = None
-    m0: int | None = None
-    ef_construction: int | None = None
-    ef: int | None = None
+    hnsw: HnswIndexInfo | None = None
 
     @staticmethod
     def from_dict(data: dict) -> "IndexInfo":
+        hnsw = data.get("hnsw")
         return IndexInfo(
-            index_type=data.get("type", ""),
-            metric=data.get("metric", ""),
-            quantization=data.get("quantization", ""),
             normalization=bool(data.get("normalization", False)),
-            max_elements=data.get("max_elements"),
-            m=data.get("m"),
-            m0=data.get("m0"),
-            ef_construction=data.get("ef_construction"),
-            ef=data.get("ef"),
+            hnsw=HnswIndexInfo.from_dict(hnsw) if isinstance(hnsw, dict) else None,
         )
 
 
@@ -37,6 +43,8 @@ class CollectionInfo:
     mutable: bool
     has_index: bool
     max_size: int
+    size: int
+    status: str
     index: IndexInfo | None = None
 
     @staticmethod
@@ -48,13 +56,15 @@ class CollectionInfo:
             mutable=bool(data.get("mutable", False)),
             has_index=bool(data.get("has_index", False)),
             max_size=int(data.get("max_size", 0)),
+            size=int(data.get("size", 0)),
+            status=str(data.get("status", "")),
             index=IndexInfo.from_dict(idx) if isinstance(idx, dict) else None,
         )
 
 
 @dataclass
 class CollectionsListResponse:
-    collections: list[CollectionInfo]
+    collections: list[CollectionInfo] = field(default_factory=list)
 
     @staticmethod
     def from_dict(data: dict) -> "CollectionsListResponse":
@@ -73,56 +83,25 @@ class SearchResult:
 
 
 @dataclass
+class VectorPoint:
+    """A single (id, vector) pair used in upsert/batch operations."""
+
+    id: int
+    vector: list[float]
+
+    def to_dict(self) -> dict:
+        return {"id": int(self.id), "vector": list(self.vector)}
+
+
+@dataclass
 class GetVectorResponse:
     id: int
     vector: list[float]
 
     @staticmethod
     def from_dict(data: dict) -> "GetVectorResponse":
+        vec = data.get("vector")
         return GetVectorResponse(
             id=int(data.get("id", 0)),
-            vector=list(data.get("vector", [])) if isinstance(data.get("vector"), list) else [],
+            vector=list(vec) if isinstance(vec, list) else [],
         )
-
-
-@dataclass
-class MatrixInfo:
-    name: str
-    dim: int
-    length: int
-    enabled: bool
-
-    @staticmethod
-    def from_dict(data: dict) -> "MatrixInfo":
-        return MatrixInfo(
-            name=data.get("name", ""),
-            dim=int(data.get("dim", 0)),
-            length=int(data.get("len", 0)),
-            enabled=bool(data.get("enabled", False)),
-        )
-
-
-@dataclass
-class PQInfo:
-    name: str
-    dim: int
-    codebooks: list[str]
-    enabled: bool
-
-    @staticmethod
-    def from_dict(data: dict) -> "PQInfo":
-        codebooks = data.get("codebooks", [])
-        return PQInfo(
-            name=data.get("name", ""),
-            dim=int(data.get("dim", 0)),
-            codebooks=list(codebooks) if isinstance(codebooks, list) else [],
-            enabled=bool(data.get("enabled", False)),
-        )
-
-
-@dataclass
-class UploadMatrixResult:
-    total_vectors: int
-    total_chunks: int
-
-

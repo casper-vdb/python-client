@@ -11,11 +11,13 @@ pip install casper-client
 ## Quick start
 
 ```python
+import math
 import os
 import random
-import math
+import time
 
-from casper_client import CasperClient
+from casper_client import CasperClient, VectorPoint
+
 
 def gen_vec(dim: int) -> list[float]:
     vec = [random.uniform(-1.0, 1.0) for _ in range(dim)]
@@ -26,67 +28,45 @@ def gen_vec(dim: int) -> list[float]:
 def main() -> None:
     host = os.getenv("CASPER_HOST", "http://127.0.0.1")
     http_port = int(os.getenv("CASPER_HTTP_PORT", "8080"))
-    grpc_port = int(os.getenv("CASPER_GRPC_PORT", "50051"))
 
-    client = CasperClient(host=host, http_port=http_port, grpc_port=grpc_port)
+    with CasperClient(host=host, http_port=http_port) as client:
+        client.health()
 
-    # 1) Health
-    client.health()
-    print("Health: OK")
+        collection = "example_collection"
+        dim = 128
 
-    collection = "example_collection"
-    dim = 128
+        client.create_collection(collection, dim=dim, max_size=10_000)
 
-    # 2) Create collection
-    client.create_collection(collection, dim=dim, max_size=10_000)
-    print(f"Collection created: {collection}")
+        # Upsert vectors (batch)
+        points = [VectorPoint(id=vid, vector=gen_vec(dim)) for vid in range(1, 6)]
+        client.upsert_vectors(collection, points)
 
-    # 3) Insert vectors
-    for vid in range(1, 6):
-        client.insert_vector(collection, id=vid, vector=gen_vec(dim))
-    print("Inserted vectors: 1..5")
+        # Mixed insert + delete
+        batch = [VectorPoint(id=vid, vector=gen_vec(dim)) for vid in range(6, 11)]
+        client.batch_update(collection, insert=batch, delete=[])
 
-    # 4) Batch insert more vectors
-    batch = [{"id": vid, "vector": gen_vec(dim)} for vid in range(6, 11)]
-    client.batch_update(collection, insert=batch, delete=[])
-    print("Batch inserted vectors: 6..10")
+        # Create HNSW index — build is asynchronous on the server.
+        client.create_hnsw_index(
+            collection,
+            metric="inner-product",
+            quantization="i8",
+            m=16,
+            m0=32,
+            ef_construction=200,
+            normalization=True,
+        )
 
-    # 5) Create HNSW index
-    client.create_hnsw_index(
-        collection,
-        metric="inner-product",
-        quantization="i8",
-        m=16,
-        m0=32,
-        ef_construction=200,
-        normalization=True,
-    )
-    print("HNSW index created")
+        # Wait until the index is ready before searching.
+        while not client.get_collection(collection).has_index:
+            time.sleep(0.2)
 
-    # 6) Search (binary output is default)
-    hits = client.search(collection, query=gen_vec(dim), limit=10)
-    print(f"Search hits: {len(hits)}")
-    for i, h in enumerate(hits[:5], start=1):
-        print(f"  {i}. id={h.id} score={h.score}")
+        hits = client.search(collection, query=gen_vec(dim), limit=10)
+        for i, h in enumerate(hits[:5], start=1):
+            print(f"  {i}. id={h.id} score={h.score}")
 
-    # 7) Get vector by id
-    v1 = client.get_vector(collection, id=1)
-    print(f"Vector 1 dim: {len(v1.vector)}")
-
-    # 8) Delete a vector
-    client.delete_vector(collection, id=10)
-    print("Vector 10 deleted")
-
-    # 9) List collections
-    cols = client.list_collections()
-    print(f"Collections: {len(cols.collections)}")
-
-    # 10) Cleanup
-    client.delete_index(collection)
-    client.delete_collection(collection)
-    print("Cleanup done")
-
-    client.close()
+        client.delete_vectors(collection, [10])
+        client.delete_index(collection)
+        client.delete_collection(collection)
 
 
 if __name__ == "__main__":
@@ -103,10 +83,10 @@ python examples/example.py
 
 The example demonstrates:
 - Collection management (create, delete, list, info)
-- Vector operations (insert, batch update, search, get, delete)
-- Index management (create/delete HNSW)
-- Matrix operations (gRPC upload, HTTP listing/info/delete)
-- PQ operations (create/list/get/delete)
+- Vector operations: `upsert_vectors` (batch PUT), `delete_vectors` (batch by id), `batch_update` (mixed insert+delete), `get_vector`
+- Mute / unmute (`mute_collection`, `unmute_collection`)
+- Index management (`create_hnsw_index`, `delete_index`) — the index build is asynchronous; the server returns 202 and the client should poll `get_collection().has_index`
+- Search (`search`, with optional `ef_search` override). Binary response format is decoded automatically.
 
 ## License
 
