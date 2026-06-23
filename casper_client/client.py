@@ -6,6 +6,8 @@ from typing import Any, Iterable, Sequence
 from casper_client.errors import CasperError, CasperErrorKind
 from casper_client.http import ApiClient
 from casper_client.models import (
+    AppConfig,
+    ClusterInfo,
     CollectionInfo,
     CollectionsListResponse,
     GetVectorResponse,
@@ -36,7 +38,7 @@ class CasperClient:
         self,
         *,
         host: str = "http://127.0.0.1",
-        http_port: int = 8080,
+        http_port: int = 7222,
         timeout: float | None = 30.0,
         **httpx_kwargs: Any,
     ) -> None:
@@ -61,11 +63,35 @@ class CasperClient:
         self.close()
 
     # -------------------------
-    # Health
+    # Health / cluster / config
     # -------------------------
 
     def health(self) -> None:
+        """GET /health — raises on non-2xx (suitable for k8s probes)."""
         self._http.request_bytes(method="GET", url="/health")
+
+    def get_cluster(self) -> ClusterInfo:
+        """GET /cluster — node role (standalone/master/replica) and
+        replication progress. Inspect :attr:`ClusterInfo.role` to know which
+        fields are meaningful."""
+        data = self._http.request_json(method="GET", url="/cluster")
+        if not isinstance(data, dict):
+            raise CasperError(
+                kind=CasperErrorKind.INVALID_RESPONSE,
+                message="expected JSON object from /cluster",
+            )
+        return ClusterInfo.from_dict(data)
+
+    def get_config(self) -> AppConfig:
+        """GET /config — runtime ``AppConfig`` the server started with.
+        Immutable after startup; restart the server to change a value."""
+        data = self._http.request_json(method="GET", url="/config")
+        if not isinstance(data, dict):
+            raise CasperError(
+                kind=CasperErrorKind.INVALID_RESPONSE,
+                message="expected JSON object from /config",
+            )
+        return AppConfig.from_dict(data)
 
     # -------------------------
     # Collections
