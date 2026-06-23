@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "casper-client"
-version = "0.1.1"
+version = "0.1.2"
 description = "Client library for the Casper Vector Database"
 authors = ["Alexander Ryzhikov <makseljoinb@gmail.com>"]
 packages = [{ include = "casper_client" }]

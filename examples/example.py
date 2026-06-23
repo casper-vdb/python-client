@@ -21,7 +21,7 @@ def gen_vec(dim: int) -> list[float]:
 
 def main() -> None:
     host = os.getenv("CASPER_HOST", "http://127.0.0.1")
-    http_port = int(os.getenv("CASPER_HTTP_PORT", "8080"))
+    http_port = int(os.getenv("CASPER_HTTP_PORT", "7222"))
 
     with CasperClient(host=host, http_port=http_port) as client:
         # 1) Health
